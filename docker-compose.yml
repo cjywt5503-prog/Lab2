@@ -1,0 +1,129 @@
+services:
+  consul:
+    image: hashicorp/consul:1.15
+    ports:
+      - "8500:8500"
+    command: "agent -server -bootstrap-expect=1 -ui -client=0.0.0.0"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [biolims-net]
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [biolims-net]
+
+  order-sample-service:
+    build:
+      context: .
+      dockerfile: order-sample-service/Dockerfile
+    restart: unless-stopped
+    expose: ["8001"]
+    environment:
+      SERVICE_NAME: order-sample-service
+      SERVICE_PORT: "8001"
+      CONSUL_HOST: consul
+      ORDER_DB_PATH: /data/orders.sqlite3
+    # Один том для всіх реплік Intake Context на цьому Docker-хості.
+    volumes:
+      - order-data:/data
+    depends_on:
+      consul:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [biolims-net]
+
+  assay-execution-service:
+    build:
+      context: .
+      dockerfile: assay-execution-service/Dockerfile
+    restart: unless-stopped
+    expose: ["8002"]
+    environment:
+      SERVICE_NAME: assay-execution-service
+      SERVICE_PORT: "8002"
+      CONSUL_HOST: consul
+      RABBITMQ_HOST: rabbitmq
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      order-sample-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [biolims-net]
+
+  validation-report-service:
+    build:
+      context: .
+      dockerfile: validation-report-service/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 20s
+    expose: ["8003"]
+    environment:
+      SERVICE_NAME: validation-report-service
+      SERVICE_PORT: "8003"
+      CONSUL_HOST: consul
+      RABBITMQ_HOST: rabbitmq
+      REPORT_DB_PATH: /data/reports.sqlite3
+    # БД Report Context відокремлена від БД Intake Context.
+    volumes:
+      - report-data:/data
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [biolims-net]
+
+  api-gateway:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./api-gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      order-sample-service:
+        condition: service_healthy
+      assay-execution-service:
+        condition: service_healthy
+      validation-report-service:
+        condition: service_healthy
+    networks: [biolims-net]
+
+networks:
+  biolims-net:
+    driver: bridge
+
+volumes:
+  order-data:
+  report-data:
+  rabbitmq-data:
